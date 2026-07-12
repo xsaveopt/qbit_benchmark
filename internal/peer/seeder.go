@@ -4,8 +4,8 @@ import (
 	"encoding/binary"
 	"net"
 
-	"github.com/sratabix/qbit_benchmark/internal/metainfo"
-	"github.com/sratabix/qbit_benchmark/internal/metrics"
+	"github.com/xsaveopt/qbit_benchmark/internal/metainfo"
+	"github.com/xsaveopt/qbit_benchmark/internal/metrics"
 )
 
 type Seeder struct {

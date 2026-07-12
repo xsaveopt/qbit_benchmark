@@ -13,10 +13,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sratabix/qbit_benchmark/internal/metainfo"
-	"github.com/sratabix/qbit_benchmark/internal/metrics"
-	"github.com/sratabix/qbit_benchmark/internal/peer"
-	"github.com/sratabix/qbit_benchmark/internal/tracker"
+	"github.com/xsaveopt/qbit_benchmark/internal/metainfo"
+	"github.com/xsaveopt/qbit_benchmark/internal/metrics"
+	"github.com/xsaveopt/qbit_benchmark/internal/peer"
+	"github.com/xsaveopt/qbit_benchmark/internal/tracker"
 )
 
 var version = "dev"

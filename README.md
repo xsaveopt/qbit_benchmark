@@ -18,7 +18,7 @@ Generate an arbitrarily large test torrent and benchmark a qBittorrent client's 
 Download the latest static Linux binary:
 
 ```sh
-curl -fL -o qbit_benchmark https://github.com/sratabix/qbit_benchmark/releases/latest/download/qbit_benchmark_linux_amd64
+curl -fL -o qbit_benchmark https://github.com/xsaveopt/qbit_benchmark/releases/latest/download/qbit_benchmark_linux_amd64
 chmod +x qbit_benchmark
 ```
 
@@ -64,7 +64,7 @@ It reports bytes and piece blocks served, piece requests received, open peer con
 ```yaml
 services:
   qbit_benchmark:
-    image: ghcr.io/sratabix/qbit_benchmark:latest
+    image: ghcr.io/xsaveopt/qbit_benchmark:latest
     container_name: qbit_benchmark
     restart: unless-stopped
     command: serve -size 4GiB -piece 1MiB -announce http://YOUR_HOST:6969/announce
@@ -83,4 +83,4 @@ docker compose up -d
 
 `latest` tracks the most recent stable release, and `1`, `1.2`, `1.2.3` pin to a major, minor, or patch line.
 `dev` tracks the tip of `main`, rebuilt on every commit, and is the easiest tag for trying an unreleased change.
-Images are published to `ghcr.io/sratabix/qbit_benchmark` for `linux/amd64`.
+Images are published to `ghcr.io/xsaveopt/qbit_benchmark` for `linux/amd64`.

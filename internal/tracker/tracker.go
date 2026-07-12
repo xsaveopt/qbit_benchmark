@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sratabix/qbit_benchmark/internal/bencode"
-	"github.com/sratabix/qbit_benchmark/internal/metrics"
+	"github.com/xsaveopt/qbit_benchmark/internal/bencode"
+	"github.com/xsaveopt/qbit_benchmark/internal/metrics"
 )
 
 const peerTTL = 2 * time.Minute

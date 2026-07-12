@@ -1,3 +1,3 @@
-module github.com/sratabix/qbit_benchmark
+module github.com/xsaveopt/qbit_benchmark
 
 go 1.26.4

@@ -5,7 +5,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/sratabix/qbit_benchmark/internal/metainfo"
+	"github.com/xsaveopt/qbit_benchmark/internal/metainfo"
 )
 
 const blockSize = 16 * 1024

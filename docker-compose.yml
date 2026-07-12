@@ -1,6 +1,6 @@
 services:
   qbit_benchmark:
-    image: ghcr.io/sratabix/qbit_benchmark:latest
+    image: ghcr.io/xsaveopt/qbit_benchmark:latest
     container_name: qbit_benchmark
     restart: unless-stopped
     command: serve -size 4GiB -piece 1MiB -announce http://YOUR_HOST:6969/announce

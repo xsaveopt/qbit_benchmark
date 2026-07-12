@@ -11,7 +11,7 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/sratabix/qbit_benchmark/internal/bencode"
+	"github.com/xsaveopt/qbit_benchmark/internal/bencode"
 )
 
 const seedKey = "x_qbb_seed"
