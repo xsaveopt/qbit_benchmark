@@ -3,7 +3,10 @@ services:
     image: ghcr.io/xsaveopt/qbit_benchmark:latest
     container_name: qbit_benchmark
     restart: unless-stopped
-    command: serve -size 4GiB -piece 1MiB -announce http://YOUR_HOST:6969/announce
+    command: serve -size 4GiB -piece 1MiB -announce http://YOUR_HOST:6969/announce -o /tmp/qbench.torrent
+    read_only: true
+    tmpfs:
+      - /tmp
     ports:
       - "6969:6969"
       - "6881:6881"
