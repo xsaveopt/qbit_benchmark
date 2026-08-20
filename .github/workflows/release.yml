@@ -11,6 +11,9 @@ permissions:
   contents: read
   packages: write
 
+env:
+  VT_API_KEY: ${{ secrets.VT_API_KEY }}
+
 jobs:
   ci:
     name: Lint & build
@@ -52,14 +55,27 @@ jobs:
           done
 
       - name: Scan with VirusTotal
-        if: ${{ github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v') && env.VT_API_KEY != '' }}
         uses: crazy-max/ghaction-virustotal@v5
         with:
           vt_api_key: ${{ secrets.VT_API_KEY }}
           request_rate: 4
-          files: |
-            dist/qbit_benchmark_linux_amd64
-            dist/qbit_benchmark_linux_arm64
+          files: dist/qbit_benchmark_linux_*
+
+      - name: VirusTotal summary
+        if: ${{ github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v') && env.VT_API_KEY != '' }}
+        shell: bash
+        run: |
+          {
+            echo "### VirusTotal scans"
+            echo
+            echo "Artifacts download as a zip; hash the extracted file, not the zip."
+            echo
+            for f in dist/qbit_benchmark_linux_*; do
+              sha=$(sha256sum "$f" | cut -d ' ' -f1)
+              echo "- [$(basename "$f")](https://www.virustotal.com/gui/file/$sha) \`$sha\`"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload dev build
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
@@ -167,20 +183,23 @@ jobs:
               -o dist/qbit_benchmark_linux_${arch} .
           done
       - name: Scan with VirusTotal
+        id: vt
+        if: ${{ env.VT_API_KEY != '' }}
         uses: crazy-max/ghaction-virustotal@v5
         with:
           vt_api_key: ${{ secrets.VT_API_KEY }}
           request_rate: 4
-          files: |
-            dist/qbit_benchmark_linux_amd64
-            dist/qbit_benchmark_linux_arm64
+          files: dist/qbit_benchmark_linux_*
+
       - name: VirusTotal summary
         id: vtsum
+        if: ${{ env.VT_API_KEY != '' }}
+        shell: bash
         run: |
           {
             echo "results<<EOF"
             echo "### VirusTotal scans"
-            for f in dist/qbit_benchmark_linux_amd64 dist/qbit_benchmark_linux_arm64; do
+            for f in dist/qbit_benchmark_linux_*; do
               sha=$(sha256sum "$f" | cut -d ' ' -f1)
               echo "- [$(basename "$f")](https://www.virustotal.com/gui/file/$sha)"
             done
