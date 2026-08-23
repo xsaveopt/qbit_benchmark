@@ -45,9 +45,10 @@ func (c Counter) Value() int64 { return c.m.val.Load() }
 
 type Gauge struct{ m *metric }
 
-func (g Gauge) Set(n int64) { g.m.val.Store(n) }
-func (g Gauge) Inc()        { g.m.val.Add(1) }
-func (g Gauge) Dec()        { g.m.val.Add(-1) }
+func (g Gauge) Set(n int64)  { g.m.val.Store(n) }
+func (g Gauge) Inc()         { g.m.val.Add(1) }
+func (g Gauge) Dec()         { g.m.val.Add(-1) }
+func (g Gauge) Value() int64 { return g.m.val.Load() }
 
 func (r *Registry) NewCounter(name, help string) Counter {
 	return Counter{m: r.register(name, help, counterKind)}

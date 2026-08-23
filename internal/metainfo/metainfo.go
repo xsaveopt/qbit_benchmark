@@ -16,6 +16,8 @@ import (
 
 const seedKey = "x_qbb_seed"
 
+const chunkSize = 16384
+
 type Torrent struct {
 	Name        string
 	PieceLength int64
@@ -59,25 +61,53 @@ func (t *Torrent) PieceSize(index int) int {
 
 func (t *Torrent) InfoHash() [20]byte { return t.infoHash }
 
-func (t *Torrent) PieceData(index int) []byte {
-	buf := make([]byte, t.PieceSize(index))
+func (t *Torrent) chunk(buf []byte, index, chunkIndex int) {
 	a := binary.LittleEndian.Uint64(t.Seed[0:8])
 	b := binary.LittleEndian.Uint64(t.Seed[8:16])
-	src := mrand.NewSource(int64(a ^ b ^ uint64(index)*0x9E3779B97F4A7C15))
+	mix := a ^ b ^ uint64(index)*0x9E3779B97F4A7C15 ^ uint64(chunkIndex)*0xC2B2AE3D27D4EB4F
+	src := mrand.NewSource(int64(mix))
 	_, _ = mrand.New(src).Read(buf)
+}
+
+func (t *Torrent) PieceData(index int) []byte {
+	size := t.PieceSize(index)
+	buf := make([]byte, size)
+	for off := 0; off < size; off += chunkSize {
+		end := off + chunkSize
+		if end > size {
+			end = size
+		}
+		t.chunk(buf[off:end], index, off/chunkSize)
+	}
 	return buf
 }
 
 func (t *Torrent) Block(index, begin, length int) []byte {
-	data := t.PieceData(index)
-	if begin < 0 || begin >= len(data) {
+	if index < 0 || int64(index) >= t.NumPieces() || length <= 0 {
+		return nil
+	}
+	size := t.PieceSize(index)
+	if begin < 0 || begin >= size {
 		return nil
 	}
 	end := begin + length
-	if end > len(data) {
-		end = len(data)
+	if end > size {
+		end = size
 	}
-	return data[begin:end]
+	out := make([]byte, end-begin)
+	var scratch [chunkSize]byte
+	for pos := begin; pos < end; {
+		ci := pos / chunkSize
+		start := ci * chunkSize
+		stop := start + chunkSize
+		if stop > size {
+			stop = size
+		}
+		t.chunk(scratch[:stop-start], index, ci)
+		n := copy(out[pos-begin:], scratch[pos-start:stop-start])
+		pos += n
+	}
+	return out
 }
 
 func (t *Torrent) computePieces() {

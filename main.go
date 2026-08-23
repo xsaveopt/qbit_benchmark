@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -123,12 +124,22 @@ func cmdServe(args []string) error {
 	seeder := peer.NewSeeder(t, m)
 	tr := tracker.New(m)
 
+	ip, seedPort, err := seederEndpoint(ann, ln.Addr())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: not advertising the seeder on the tracker: %v\n", err)
+	} else {
+		tr.AddSeeder(t.InfoHash(), ip, seedPort)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/announce", tr.Announce)
 	mux.Handle("/metrics", m.Handler())
 
 	printTorrent(t, *torrentPath, ann)
 	fmt.Printf("tracker on %s, seeder on %s, metrics on %s/metrics\n", *httpAddr, *peerAddr, *httpAddr)
+	if ip != nil {
+		fmt.Printf("advertising seeder to the swarm as %s\n", net.JoinHostPort(ip.String(), strconv.Itoa(int(seedPort))))
+	}
 	fmt.Println("add the .torrent to qBittorrent to start the download benchmark")
 
 	go func() {
@@ -155,6 +166,9 @@ func cmdLeech(args []string) error {
 	if *torrentPath == "" || *addr == "" {
 		return errors.New("leech requires -torrent and -addr")
 	}
+	if *n < 1 {
+		return fmt.Errorf("leech: -n must be at least 1, got %d", *n)
+	}
 	t, _, err := metainfo.Load(*torrentPath)
 	if err != nil {
 		return err
@@ -176,16 +190,28 @@ func cmdLeech(args []string) error {
 	elapsed := time.Since(start)
 
 	var total int64
+	failed := 0
+	var firstErr error
 	for i := range results {
 		if errs[i] != nil {
+			failed++
+			if firstErr == nil {
+				firstErr = errs[i]
+			}
 			fmt.Printf("conn %d: %v\n", i, errs[i])
 			continue
 		}
 		total += results[i].Bytes
 		fmt.Printf("conn %d: %s in %s (%.1f MB/s)\n", i, humanBytes(results[i].Bytes), results[i].Duration.Round(time.Millisecond), results[i].MBps())
 	}
+	if failed == len(results) {
+		return fmt.Errorf("all %d connections failed: %w", failed, firstErr)
+	}
 	agg := float64(total) / 1e6 / elapsed.Seconds()
 	fmt.Printf("aggregate: %s in %s (%.1f MB/s)\n", humanBytes(total), elapsed.Round(time.Millisecond), agg)
+	if failed > 0 {
+		fmt.Printf("%d of %d connections failed; many clients accept only one connection per IP\n", failed, len(results))
+	}
 	return nil
 }
 
@@ -210,6 +236,36 @@ func printTorrent(t *metainfo.Torrent, path, announce string) {
 	fmt.Printf("size:     %s (%d pieces of %s)\n", humanBytes(t.TotalSize), t.NumPieces(), humanBytes(t.PieceLength))
 	fmt.Printf("infohash: %s\n", hex.EncodeToString(ih[:]))
 	fmt.Printf("announce: %s\n", announce)
+}
+
+func seederEndpoint(announce string, listen net.Addr) (net.IP, uint16, error) {
+	u, err := url.Parse(announce)
+	if err != nil {
+		return nil, 0, fmt.Errorf("announce URL: %w", err)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return nil, 0, fmt.Errorf("announce URL %q has no host", announce)
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return nil, 0, fmt.Errorf("resolving %q: %w", host, err)
+	}
+	var ip net.IP
+	for _, candidate := range ips {
+		if v4 := candidate.To4(); v4 != nil {
+			ip = v4
+			break
+		}
+	}
+	if ip == nil {
+		return nil, 0, fmt.Errorf("%q has no IPv4 address", host)
+	}
+	tcp, ok := listen.(*net.TCPAddr)
+	if !ok {
+		return nil, 0, errors.New("seeder is not listening on TCP")
+	}
+	return ip, uint16(tcp.Port), nil
 }
 
 func portOf(addr string) string {
