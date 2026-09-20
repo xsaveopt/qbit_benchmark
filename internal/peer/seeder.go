@@ -68,11 +68,11 @@ func (s *Seeder) handle(conn net.Conn) {
 			binary.BigEndian.PutUint32(resp[0:4], uint32(index))
 			binary.BigEndian.PutUint32(resp[4:8], uint32(begin))
 			copy(resp[8:], block)
+			s.m.BytesServed.Add(int64(len(block)))
+			s.m.PiecesServed.Inc()
 			if err := writeMessage(conn, msgPiece, resp); err != nil {
 				return
 			}
-			s.m.BytesServed.Add(int64(len(block)))
-			s.m.PiecesServed.Inc()
 		}
 	}
 }
