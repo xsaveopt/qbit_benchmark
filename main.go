@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -24,21 +26,21 @@ var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
-		usage()
+		usage(os.Stderr)
 		os.Exit(2)
 	}
 	var err error
 	switch os.Args[1] {
 	case "gen":
-		err = cmdGen(os.Args[2:])
+		err = cmdGen(os.Args[2:], os.Stdout, os.Stderr)
 	case "serve":
-		err = cmdServe(os.Args[2:])
+		err = cmdServe(context.Background(), os.Args[2:], os.Stdout, os.Stderr)
 	case "leech":
-		err = cmdLeech(os.Args[2:])
+		err = cmdLeech(os.Args[2:], os.Stdout, os.Stderr)
 	case "version", "-v", "--version":
 		fmt.Println("qbit_benchmark", version)
 	default:
-		usage()
+		usage(os.Stderr)
 		os.Exit(2)
 	}
 	if err != nil {
@@ -47,8 +49,8 @@ func main() {
 	}
 }
 
-func usage() {
-	fmt.Fprintln(os.Stderr, `qbit_benchmark - generate test torrents and benchmark a qBittorrent client
+func usage(w io.Writer) {
+	_, _ = fmt.Fprintln(w, `qbit_benchmark - generate test torrents and benchmark a qBittorrent client
 
 usage:
   qbit_benchmark gen    -size 1GiB -piece 256KiB -announce http://HOST:6969/announce -o qbench.torrent
@@ -57,13 +59,14 @@ usage:
   qbit_benchmark version`)
 }
 
-func cmdGen(args []string) error {
+func cmdGen(args []string, out, errOut io.Writer) error {
 	fs := flag.NewFlagSet("gen", flag.ExitOnError)
+	fs.SetOutput(errOut)
 	name := fs.String("name", "qbench", "torrent name")
 	size := fs.String("size", "1GiB", "total size (e.g. 512MiB, 4GiB)")
 	piece := fs.String("piece", "256KiB", "piece length (multiple of 16KiB)")
 	announce := fs.String("announce", "http://127.0.0.1:6969/announce", "tracker announce URL")
-	out := fs.String("o", "qbench.torrent", "output .torrent path")
+	outPath := fs.String("o", "qbench.torrent", "output .torrent path")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -71,20 +74,21 @@ func cmdGen(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := t.WriteFile(*out, *announce); err != nil {
+	if err := t.WriteFile(*outPath, *announce); err != nil {
 		return err
 	}
-	printTorrent(t, *out, *announce)
+	printTorrent(out, t, *outPath, *announce)
 	return nil
 }
 
-func cmdServe(args []string) error {
+func cmdServe(ctx context.Context, args []string, out, errOut io.Writer) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	fs.SetOutput(errOut)
 	torrentPath := fs.String("torrent", "", "existing .torrent to seed (else one is generated)")
 	name := fs.String("name", "qbench", "torrent name when generating")
 	size := fs.String("size", "1GiB", "total size when generating")
 	piece := fs.String("piece", "256KiB", "piece length when generating")
-	out := fs.String("o", "qbench.torrent", "where to write a generated .torrent")
+	outPath := fs.String("o", "qbench.torrent", "where to write a generated .torrent")
 	httpAddr := fs.String("http", ":6969", "tracker HTTP listen address")
 	peerAddr := fs.String("peer", ":6881", "seeder TCP listen address")
 	announce := fs.String("announce", "", "tracker announce URL to embed (default derived from -http)")
@@ -109,54 +113,99 @@ func cmdServe(args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := built.WriteFile(*out, ann); err != nil {
+		if err := built.WriteFile(*outPath, ann); err != nil {
 			return err
 		}
 		t = built
-		fmt.Printf("generated %s\n", *out)
+		_, _ = fmt.Fprintf(out, "generated %s\n", *outPath)
 	}
 
-	ln, err := net.Listen("tcp", *peerAddr)
+	peerLn, err := net.Listen("tcp", *peerAddr)
 	if err != nil {
 		return err
 	}
-	m := metrics.NewApp()
-	seeder := peer.NewSeeder(t, m)
-	tr := tracker.New(m)
+	defer func() { _ = peerLn.Close() }()
 
-	ip, seedPort, err := seederEndpoint(ann, ln.Addr())
+	httpLn, err := net.Listen("tcp", *httpAddr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: not advertising the seeder on the tracker: %v\n", err)
-	} else {
-		tr.AddSeeder(t.InfoHash(), ip, seedPort)
+		return err
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/announce", tr.Announce)
-	mux.Handle("/metrics", m.Handler())
+	srv := newBenchServer(t, ann, peerLn, errOut)
 
-	printTorrent(t, *torrentPath, ann)
-	fmt.Printf("tracker on %s, seeder on %s, metrics on %s/metrics\n", *httpAddr, *peerAddr, *httpAddr)
-	if ip != nil {
-		fmt.Printf("advertising seeder to the swarm as %s\n", net.JoinHostPort(ip.String(), strconv.Itoa(int(seedPort))))
+	printTorrent(out, t, *torrentPath, ann)
+	_, _ = fmt.Fprintf(out, "tracker on %s, seeder on %s, metrics on %s/metrics\n", httpLn.Addr(), peerLn.Addr(), httpLn.Addr())
+	if srv.seedIP != nil {
+		_, _ = fmt.Fprintf(out, "advertising seeder to the swarm as %s\n", net.JoinHostPort(srv.seedIP.String(), strconv.Itoa(int(srv.seedPort))))
 	}
-	fmt.Println("add the .torrent to qBittorrent to start the download benchmark")
+	_, _ = fmt.Fprintln(out, "add the .torrent to qBittorrent to start the download benchmark")
 
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	done := make(chan struct{})
+	var progress sync.WaitGroup
+	progress.Add(1)
 	go func() {
-		var last int64
-		for range time.Tick(time.Second) {
-			cur := m.BytesServed.Value()
-			fmt.Printf("\rserved %s, %s/s        ", humanBytes(cur), humanBytes(cur-last))
-			last = cur
-		}
+		defer progress.Done()
+		reportProgress(out, srv.metrics.BytesServed.Value, ticker.C, done)
 	}()
-	go func() { _ = seeder.Serve(ln) }()
+	defer progress.Wait()
+	defer close(done)
 
-	return http.ListenAndServe(*httpAddr, mux)
+	go func() { _ = srv.seeder.Serve(peerLn) }()
+
+	hs := &http.Server{Handler: srv.mux, ReadHeaderTimeout: 10 * time.Second}
+	stop := context.AfterFunc(ctx, func() { _ = hs.Close() })
+	defer stop()
+	if err := hs.Serve(httpLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }
 
-func cmdLeech(args []string) error {
+type benchServer struct {
+	metrics  *metrics.App
+	seeder   *peer.Seeder
+	mux      *http.ServeMux
+	seedIP   net.IP
+	seedPort uint16
+}
+
+func newBenchServer(t *metainfo.Torrent, announce string, peerLn net.Listener, errOut io.Writer) *benchServer {
+	m := metrics.NewApp()
+	tr := tracker.New(m)
+	srv := &benchServer{metrics: m, seeder: peer.NewSeeder(t, m), mux: http.NewServeMux()}
+
+	ip, port, err := seederEndpoint(announce, peerLn.Addr())
+	if err != nil {
+		_, _ = fmt.Fprintf(errOut, "warning: not advertising the seeder on the tracker: %v\n", err)
+	} else {
+		tr.AddSeeder(t.InfoHash(), ip, port)
+		srv.seedIP, srv.seedPort = ip, port
+	}
+
+	srv.mux.HandleFunc("/announce", tr.Announce)
+	srv.mux.Handle("/metrics", m.Handler())
+	return srv
+}
+
+func reportProgress(w io.Writer, served func() int64, tick <-chan time.Time, done <-chan struct{}) {
+	var last int64
+	for {
+		select {
+		case <-done:
+			return
+		case <-tick:
+			cur := served()
+			_, _ = fmt.Fprintf(w, "\rserved %s, %s/s        ", humanBytes(cur), humanBytes(cur-last))
+			last = cur
+		}
+	}
+}
+
+func cmdLeech(args []string, out, errOut io.Writer) error {
 	fs := flag.NewFlagSet("leech", flag.ExitOnError)
+	fs.SetOutput(errOut)
 	torrentPath := fs.String("torrent", "", "the .torrent the target is seeding (required)")
 	addr := fs.String("addr", "", "target peer host:port to pull from (required)")
 	n := fs.Int("n", 4, "number of parallel connections")
@@ -174,7 +223,7 @@ func cmdLeech(args []string) error {
 		return err
 	}
 
-	fmt.Printf("pulling from %s with %d connections...\n", *addr, *n)
+	_, _ = fmt.Fprintf(out, "pulling from %s with %d connections...\n", *addr, *n)
 	results := make([]peer.Result, *n)
 	errs := make([]error, *n)
 	var wg sync.WaitGroup
@@ -198,19 +247,19 @@ func cmdLeech(args []string) error {
 			if firstErr == nil {
 				firstErr = errs[i]
 			}
-			fmt.Printf("conn %d: %v\n", i, errs[i])
+			_, _ = fmt.Fprintf(out, "conn %d: %v\n", i, errs[i])
 			continue
 		}
 		total += results[i].Bytes
-		fmt.Printf("conn %d: %s in %s (%.1f MB/s)\n", i, humanBytes(results[i].Bytes), results[i].Duration.Round(time.Millisecond), results[i].MBps())
+		_, _ = fmt.Fprintf(out, "conn %d: %s in %s (%.1f MB/s)\n", i, humanBytes(results[i].Bytes), results[i].Duration.Round(time.Millisecond), results[i].MBps())
 	}
 	if failed == len(results) {
 		return fmt.Errorf("all %d connections failed: %w", failed, firstErr)
 	}
 	agg := float64(total) / 1e6 / elapsed.Seconds()
-	fmt.Printf("aggregate: %s in %s (%.1f MB/s)\n", humanBytes(total), elapsed.Round(time.Millisecond), agg)
+	_, _ = fmt.Fprintf(out, "aggregate: %s in %s (%.1f MB/s)\n", humanBytes(total), elapsed.Round(time.Millisecond), agg)
 	if failed > 0 {
-		fmt.Printf("%d of %d connections failed; many clients accept only one connection per IP\n", failed, len(results))
+		_, _ = fmt.Fprintf(out, "%d of %d connections failed; many clients accept only one connection per IP\n", failed, len(results))
 	}
 	return nil
 }
@@ -227,15 +276,15 @@ func buildTorrent(name, size, piece string) (*metainfo.Torrent, error) {
 	return metainfo.New(name, total, pieceLen)
 }
 
-func printTorrent(t *metainfo.Torrent, path, announce string) {
+func printTorrent(w io.Writer, t *metainfo.Torrent, path, announce string) {
 	ih := t.InfoHash()
 	if path != "" {
-		fmt.Printf("torrent:  %s\n", path)
+		_, _ = fmt.Fprintf(w, "torrent:  %s\n", path)
 	}
-	fmt.Printf("name:     %s\n", t.Name)
-	fmt.Printf("size:     %s (%d pieces of %s)\n", humanBytes(t.TotalSize), t.NumPieces(), humanBytes(t.PieceLength))
-	fmt.Printf("infohash: %s\n", hex.EncodeToString(ih[:]))
-	fmt.Printf("announce: %s\n", announce)
+	_, _ = fmt.Fprintf(w, "name:     %s\n", t.Name)
+	_, _ = fmt.Fprintf(w, "size:     %s (%d pieces of %s)\n", humanBytes(t.TotalSize), t.NumPieces(), humanBytes(t.PieceLength))
+	_, _ = fmt.Fprintf(w, "infohash: %s\n", hex.EncodeToString(ih[:]))
+	_, _ = fmt.Fprintf(w, "announce: %s\n", announce)
 }
 
 func seederEndpoint(announce string, listen net.Addr) (net.IP, uint16, error) {
