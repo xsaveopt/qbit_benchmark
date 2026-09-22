@@ -469,6 +469,7 @@ func TestMainDispatchesSubcommands(t *testing.T) {
 		{"failing subcommand", []string{"gen", "-size", "notasize"}, 1, "", "error:"},
 		{"undefined flag", []string{"gen", "-nosuchflag"}, 2, "", "flag provided but not defined"},
 		{"leech without its required flags", []string{"leech"}, 1, "", "leech requires -torrent and -addr"},
+		{"healthcheck against nothing listening", []string{"healthcheck", "-addr", "127.0.0.1:1"}, 1, "", "error:"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -490,10 +491,51 @@ func TestUsageNamesEverySubcommand(t *testing.T) {
 	var buf bytes.Buffer
 	usage(&buf)
 	got := buf.String()
-	for _, want := range []string{"qbit_benchmark gen", "qbit_benchmark serve", "qbit_benchmark leech", "qbit_benchmark version", "-announce", "-piece"} {
+	for _, want := range []string{"qbit_benchmark gen", "qbit_benchmark serve", "qbit_benchmark leech", "qbit_benchmark healthcheck", "qbit_benchmark version", "-announce", "-piece"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("usage does not mention %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestHTTPAddrDefaultReadsEnv(t *testing.T) {
+	t.Setenv("QBIT_HTTP_ADDR", ":7000")
+	if got := httpAddrDefault(); got != ":7000" {
+		t.Fatalf("httpAddrDefault() = %q, want %q", got, ":7000")
+	}
+}
+
+func TestCmdHealthcheckDefaultAddrFollowsEnv(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "up")
+	}))
+	defer up.Close()
+
+	t.Setenv("QBIT_HTTP_ADDR", up.Listener.Addr().String())
+	var errOut bytes.Buffer
+	if err := cmdHealthcheck(nil, &errOut); err != nil {
+		t.Fatalf("healthcheck without -addr failed: %v", err)
+	}
+}
+
+func TestCmdHealthcheckReportsSuccessAndFailure(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "up")
+	}))
+	defer up.Close()
+
+	var errOut bytes.Buffer
+	if err := cmdHealthcheck([]string{"-addr", strings.TrimPrefix(up.URL, "http://")}, &errOut); err != nil {
+		t.Fatalf("healthcheck against a healthy server failed: %v", err)
+	}
+
+	degraded := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "degraded", http.StatusServiceUnavailable)
+	}))
+	defer degraded.Close()
+
+	if err := cmdHealthcheck([]string{"-addr", strings.TrimPrefix(degraded.URL, "http://")}, &errOut); err == nil {
+		t.Fatal("healthcheck against a degraded server should have failed")
 	}
 }
 
@@ -833,6 +875,56 @@ func TestNewBenchServerAdvertisesTheSeederAndExposesMetrics(t *testing.T) {
 	}
 }
 
+func TestNewBenchServerHealthReportsUp(t *testing.T) {
+	tor := newTestTorrent(t, 16384)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	var warnings bytes.Buffer
+	srv := newBenchServer(tor, "http://127.0.0.1:6969/announce", ln, &warnings)
+
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /health returned %d", rec.Code)
+	}
+	if got := rec.Body.String(); got != "up" {
+		t.Fatalf("GET /health body = %q, want %q", got, "up")
+	}
+}
+
+func TestNewBenchServerHealthReportsDegradedWhenTheSeederStops(t *testing.T) {
+	tor := newTestTorrent(t, 16384)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var warnings bytes.Buffer
+	srv := newBenchServer(tor, "http://127.0.0.1:6969/announce", ln, &warnings)
+
+	stopped := make(chan struct{})
+	go func() {
+		_ = srv.seeder.Serve(ln)
+		srv.seederUp.Store(false)
+		close(stopped)
+	}()
+	_ = ln.Close()
+	<-stopped
+
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("GET /health returned %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	if got := rec.Body.String(); got != "degraded" {
+		t.Fatalf("GET /health body = %q, want %q", got, "degraded")
+	}
+}
+
 func TestNewBenchServerWarnsWhenTheSeederCannotBeAdvertised(t *testing.T) {
 	tor := newTestTorrent(t, 16384)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -890,6 +982,10 @@ func TestCmdServeRunsTheTrackerSeederAndMetrics(t *testing.T) {
 
 	if body := string(getBody(t, httpAddr, "/metrics")); !strings.Contains(body, "qbb_bytes_served_total 0") {
 		t.Fatalf("metrics before the transfer:\n%s", body)
+	}
+
+	if body := string(getBody(t, httpAddr, "/health")); body != "up" {
+		t.Fatalf("GET /health = %q, want %q", body, "up")
 	}
 
 	peers, complete := decodeAnnounce(t, getBody(t, httpAddr, announcePath(tor.InfoHash(), "-QB5000-leecher01", "6881", "100")))

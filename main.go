@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xsaveopt/qbit_benchmark/internal/metainfo"
@@ -37,6 +38,8 @@ func main() {
 		err = cmdServe(context.Background(), os.Args[2:], os.Stdout, os.Stderr)
 	case "leech":
 		err = cmdLeech(os.Args[2:], os.Stdout, os.Stderr)
+	case "healthcheck":
+		err = cmdHealthcheck(os.Args[2:], os.Stderr)
 	case "version", "-v", "--version":
 		fmt.Println("qbit_benchmark", version)
 	default:
@@ -56,7 +59,10 @@ usage:
   qbit_benchmark gen    -size 1GiB -piece 256KiB -announce http://HOST:6969/announce -o qbench.torrent
   qbit_benchmark serve  -torrent qbench.torrent -http :6969 -peer :6881
   qbit_benchmark leech  -torrent qbench.torrent -addr HOST:PORT -n 4
-  qbit_benchmark version`)
+  qbit_benchmark healthcheck -addr 127.0.0.1:6969
+  qbit_benchmark version
+
+serve and healthcheck both default -http/-addr from the QBIT_HTTP_ADDR env var when set.`)
 }
 
 func cmdGen(args []string, out, errOut io.Writer) error {
@@ -89,7 +95,7 @@ func cmdServe(ctx context.Context, args []string, out, errOut io.Writer) error {
 	size := fs.String("size", "1GiB", "total size when generating")
 	piece := fs.String("piece", "256KiB", "piece length when generating")
 	outPath := fs.String("o", "qbench.torrent", "where to write a generated .torrent")
-	httpAddr := fs.String("http", ":6969", "tracker HTTP listen address")
+	httpAddr := fs.String("http", httpAddrDefault(), "tracker HTTP listen address (env QBIT_HTTP_ADDR)")
 	peerAddr := fs.String("peer", ":6881", "seeder TCP listen address")
 	announce := fs.String("announce", "", "tracker announce URL to embed (default derived from -http)")
 	if err := fs.Parse(args); err != nil {
@@ -152,7 +158,10 @@ func cmdServe(ctx context.Context, args []string, out, errOut io.Writer) error {
 	defer progress.Wait()
 	defer close(done)
 
-	go func() { _ = srv.seeder.Serve(peerLn) }()
+	go func() {
+		_ = srv.seeder.Serve(peerLn)
+		srv.seederUp.Store(false)
+	}()
 
 	hs := &http.Server{Handler: srv.mux, ReadHeaderTimeout: 10 * time.Second}
 	stop := context.AfterFunc(ctx, func() { _ = hs.Close() })
@@ -169,12 +178,14 @@ type benchServer struct {
 	mux      *http.ServeMux
 	seedIP   net.IP
 	seedPort uint16
+	seederUp atomic.Bool
 }
 
 func newBenchServer(t *metainfo.Torrent, announce string, peerLn net.Listener, errOut io.Writer) *benchServer {
 	m := metrics.NewApp()
 	tr := tracker.New(m)
 	srv := &benchServer{metrics: m, seeder: peer.NewSeeder(t, m), mux: http.NewServeMux()}
+	srv.seederUp.Store(true)
 
 	ip, port, err := seederEndpoint(announce, peerLn.Addr())
 	if err != nil {
@@ -186,7 +197,18 @@ func newBenchServer(t *metainfo.Torrent, announce string, peerLn net.Listener, e
 
 	srv.mux.HandleFunc("/announce", tr.Announce)
 	srv.mux.Handle("/metrics", m.Handler())
+	srv.mux.HandleFunc("/health", srv.handleHealth)
 	return srv
+}
+
+func (srv *benchServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if !srv.seederUp.Load() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, "degraded")
+		return
+	}
+	_, _ = io.WriteString(w, "up")
 }
 
 func reportProgress(w io.Writer, served func() int64, tick <-chan time.Time, done <-chan struct{}) {
@@ -260,6 +282,32 @@ func cmdLeech(args []string, out, errOut io.Writer) error {
 	_, _ = fmt.Fprintf(out, "aggregate: %s in %s (%.1f MB/s)\n", humanBytes(total), elapsed.Round(time.Millisecond), agg)
 	if failed > 0 {
 		_, _ = fmt.Fprintf(out, "%d of %d connections failed; many clients accept only one connection per IP\n", failed, len(results))
+	}
+	return nil
+}
+
+func httpAddrDefault() string {
+	if v := os.Getenv("QBIT_HTTP_ADDR"); v != "" {
+		return v
+	}
+	return ":6969"
+}
+
+func cmdHealthcheck(args []string, errOut io.Writer) error {
+	fs := flag.NewFlagSet("healthcheck", flag.ExitOnError)
+	fs.SetOutput(errOut)
+	addr := fs.String("addr", "127.0.0.1"+portOf(httpAddrDefault()), "tracker HTTP address to probe (env QBIT_HTTP_ADDR)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	client := http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://" + *addr + "/health")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("health check returned %d", resp.StatusCode)
 	}
 	return nil
 }
